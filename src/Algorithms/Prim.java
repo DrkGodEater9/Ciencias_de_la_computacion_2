@@ -1,46 +1,68 @@
 package Algorithms;
 
-import Model.AdjacencyMatrix;
+import Model.Edge;
+import Model.Graph;
+import Model.Node;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.PriorityQueue;
 
 public class Prim {
 
-    public void primAlgorithm(AdjacencyMatrix graph) {
+    /**
+     * Calcula el Árbol de Recubrimiento Mínimo (o bosque, si el grafo
+     * está desconectado) sobre cualquier implementación de Graph.
+     * Reemplaza la versión anterior que dependía de AdjacencyMatrix.
+     */
+    public List<Edge> primAlgorithm(Graph graph) {
         int size = graph.vertexCount();
+        List<Edge> result = new ArrayList<Edge>();
+        if (size == 0) return result;
 
         boolean[] inMst = new boolean[size];
-        double[] keyValues = new double[size];
-        int[] parents = new int[size];
+        double[]  key   = new double[size];
+        Edge[]    edgeToMst = new Edge[size]; // arista con la que v entró al árbol
 
-        for (int i = 0; i < size; i++) {
-            keyValues[i] = Double.POSITIVE_INFINITY;
-            parents[i] = -1;
+        Arrays.fill(key, Double.POSITIVE_INFINITY);
+
+        PriorityQueue<Node> pq = new PriorityQueue<Node>();
+
+        // Recorremos todos los vértices como posibles semillas para cubrir
+        // también grafos desconectados (islas de calles sin conexión).
+        for (int start = 0; start < size; start++) {
+            if (inMst[start]) continue;
+
+            key[start] = 0.0;
+            pq.add(new Node(start, 0.0));
+
+            while (!pq.isEmpty()) {
+                Node current = pq.poll();
+                int u = current.getVertex();
+
+                if (inMst[u]) continue;   // ya lo procesamos (entrada obsoleta)
+                inMst[u] = true;
+
+                if (edgeToMst[u] != null) result.add(edgeToMst[u]);
+
+                for (Edge e : graph.edgesOf(u)) {
+                    int v = e.getOther(u);
+                    if (v == -1 || inMst[v]) continue;
+
+                    double w = e.getWeight();
+                    if (w < key[v]) {
+                        key[v] = w;
+                        edgeToMst[v] = e;
+                        pq.add(new Node(v, w));
+                    }
+                }
+            }
         }
-        keyValues[0] = 0;
 
         System.out.println("Edge \tWeight");
-        for (int count = 0; count < size; count++) {
-            int u = -1;
-            double min = Double.POSITIVE_INFINITY;
-            for (int v = 0; v < size; v++) {
-                if (!inMst[v] && keyValues[v] < min) {
-                    min = keyValues[v];
-                    u = v;
-                }
-            }
-
-            inMst[u] = true;
-
-            if (parents[u] != -1) {
-                System.out.println(parents[u] + "-" + u + " \t" + graph.getWeight(u, parents[u]));
-            }
-
-            for (int v = 0; v < size; v++) {
-                double weight = graph.getWeight(u, v);
-                if (weight > 0 && weight < keyValues[v] && !inMst[v]) {
-                    keyValues[v] = weight;
-                    parents[v] = u;
-                }
-            }
+        for (Edge e : result) {
+            System.out.println(e.getSource() + "-" + e.getDestination() + " \t" + e.getWeight());
         }
+        return result;
     }
 }
