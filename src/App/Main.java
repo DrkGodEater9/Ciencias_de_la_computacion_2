@@ -1,12 +1,16 @@
 package App;
 
 import Algorithms.AStar;
+import Algorithms.Kruskal;
+import Algorithms.Prim;
 import IO.MapExporter;
 import IO.OSMParser;
 import Model.Edge;
+import Model.Graph;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Scanner;
@@ -93,7 +97,7 @@ public class Main {
             System.out.println("Mapa: " + archivoCargado + "  |  vertices: " + parser.getVertexCount()
                     + "  |  criticos: " + criticos.size());
         }
-        System.out.println("1. Cargar mapa y exportar el mapa interactivo");
+        System.out.println("1. Cargar mapa y exportar el mapa con el MST en rojo");
         System.out.println("2. Registrar puntos criticos");
         System.out.println("3. Simular accidente");
         System.out.println("4. Ver metricas");
@@ -147,6 +151,9 @@ public class Main {
             System.out.println("  calles de un solo sentido: " + parser.getOnewayStreetCount());
             System.out.println("  calles de doble sentido: " + parser.getTwoWayStreetCount());
 
+            // calculamos el MST para dibujarlo en rojo sobre el mapa
+            List<Edge> mst = calcularMST();
+
             // exportar el html con MapExporter, en la carpeta mapas/
             File carpetaMapas = new File(MAPS_DIR);
             if (!carpetaMapas.exists()) {
@@ -160,7 +167,7 @@ public class Main {
             }
 
             MapExporter exp = new MapExporter(parser);
-            exp.exportar(salida);
+            exp.exportar(salida, mst);   // siempre con el MST en rojo
 
         } catch (IOException e) {
             System.out.println("No se pudo leer el archivo: " + e.getMessage());
@@ -358,6 +365,49 @@ public class Main {
             System.out.println("Todavia no has simulado ningun accidente.");
         }
         System.out.println("==============================\n");
+    }
+
+    // calcula el MST (arbol de recubrimiento minimo) y devuelve sus aristas
+    // para poder dibujarlas en rojo sobre el mapa
+    static List<Edge> calcularMST() {
+        System.out.println("Con que algoritmo quieres el MST?");
+        System.out.println("  1. Prim");
+        System.out.println("  2. Kruskal");
+        int alg = leerEntero("Opcion: ");
+
+        // OJO: el MST se calcula sobre el grafo NO dirigido. El arbol de
+        // recubrimiento minimo solo tiene sentido en grafos no dirigidos, asi
+        // que aca no importa si la calle es de uno o de doble sentido.
+        Graph noDirigido = parser.getUndirectedGraph();
+
+        // Prim y Kruskal imprimen todas las aristas por consola (miles de lineas),
+        // asi que apago la salida un momento mientras corren para no llenar todo.
+        PrintStream consolaReal = System.out;
+        System.setOut(new PrintStream(PrintStream.nullOutputStream()));
+
+        List<Edge> mst;
+        String nombreAlg;
+        if (alg == 2) {
+            mst = new Kruskal().kruskalAlgorithm(noDirigido);
+            nombreAlg = "Kruskal";
+        } else {
+            mst = new Prim().primAlgorithm(noDirigido);
+            nombreAlg = "Prim";
+        }
+
+        System.setOut(consolaReal); // vuelvo a prender la consola
+
+        // longitud total del arbol
+        double total = 0;
+        for (Edge e : mst) {
+            total += e.getWeight();
+        }
+
+        System.out.println("MST calculado con " + nombreAlg);
+        System.out.println("  aristas del arbol: " + mst.size());
+        System.out.printf("  longitud total del MST: %.2f km%n", total / 1000.0);
+
+        return mst;
     }
 
     // ---------- metodos de apoyo ----------
