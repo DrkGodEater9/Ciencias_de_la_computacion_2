@@ -13,6 +13,7 @@ public class Edge {
     private int source;
     private int destination;
     private double weight;
+    private boolean oneway; // true = solo se puede recorrer source -> destination
 
     public Edge(int id, int source, int destination) {
         this.id = id;
@@ -25,6 +26,27 @@ public class Edge {
         this.source = source;
         this.destination = destination;
         this.weight = weight;
+    }
+
+    public Edge(int id, int source, int destination, double weight, boolean oneway) {
+        this.id = id;
+        this.source = source;
+        this.destination = destination;
+        this.weight = weight;
+        this.oneway = oneway;
+    }
+
+    public boolean isOneway() {
+        return oneway;
+    }
+
+    public void setOneway(boolean oneway) {
+        this.oneway = oneway;
+    }
+
+    /** Texto legible para reportes/depuración: "unidireccional" o "bidireccional". */
+    public String directionLabel() {
+        return oneway ? "unidireccional" : "bidireccional";
     }
 
     public int getId() {
