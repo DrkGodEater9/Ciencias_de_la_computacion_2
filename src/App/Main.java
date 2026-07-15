@@ -9,8 +9,11 @@ import Model.Edge;
 import Model.Graph;
 
 import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Scanner;
@@ -31,6 +34,12 @@ public class Main {
 
     static final String DATA_DIR = "src/Data";   // aqui estan los geojson
     static final String MAPS_DIR = "mapas";       // aqui se guardan los html que exporta MapExporter
+    static final String HIST_FILE = DATA_DIR + "/historial_accidentes.csv"; // historial de accidentes (opcion 6B)
+
+    // Velocidad que asumimos para la ambulancia (con sirena) en el casco urbano
+    // de Yopal. Es el maximo realista que puede sostener por avenidas urbanas.
+    // Con esto convertimos la distancia de la ruta en tiempo de respuesta.
+    static final double VELOCIDAD_AMBULANCIA_KMH = 60.0;
 
     // un punto critico ya "pegado" a un vertice del grafo
     static class PuntoCritico {
@@ -59,6 +68,7 @@ public class Main {
     static String archivoCargado = null;
     static ArrayList<PuntoCritico> criticos = new ArrayList<PuntoCritico>();
     static ResultadoAccidente ultimoAccidente = null;
+    static List<Edge> mstActual = null;   // el MST del mapa cargado, para reusarlo en la simulacion
 
     static Scanner sc = new Scanner(System.in);
 
@@ -79,6 +89,10 @@ public class Main {
                 simularAccidente();
             } else if (op == 4) {
                 mostrarMetricas();
+            } else if (op == 5) {
+                compararRutasVsMST();
+            } else if (op == 6) {
+                sugerirUbicaciones();
             } else if (op == 0) {
                 salir = true;
             } else {
@@ -101,6 +115,8 @@ public class Main {
         System.out.println("2. Registrar puntos criticos");
         System.out.println("3. Simular accidente");
         System.out.println("4. Ver metricas");
+        System.out.println("5. Comparar rutas individuales vs MST (para el informe)");
+        System.out.println("6. Sugerir ubicaciones de estaciones");
         System.out.println("0. Salir");
     }
 
@@ -150,9 +166,12 @@ public class Main {
             System.out.println("  aristas: " + parser.getGraph().edgeCount());
             System.out.println("  calles de un solo sentido: " + parser.getOnewayStreetCount());
             System.out.println("  calles de doble sentido: " + parser.getTwoWayStreetCount());
+            System.out.println("  vias descartadas (peatonales, ciclorrutas, etc): " + parser.getDiscardedWayCount());
 
             // calculamos el MST para dibujarlo en rojo sobre el mapa
+            // (y lo guardamos para reusarlo despues en la simulacion)
             List<Edge> mst = calcularMST();
+            mstActual = mst;
 
             // exportar el html con MapExporter, en la carpeta mapas/
             File carpetaMapas = new File(MAPS_DIR);
@@ -238,21 +257,8 @@ public class Main {
             double lon = leerDouble("Longitud del accidente: ");
             vAcc = parser.nearestVertex(lat, lon);
         } else if (modo == 2) {
-            // vertice al azar. Como el grafo es dirigido, a veces un vertice no
-            // alcanza a ningun critico por el sentido de las calles, asi que
-            // reintento unas cuantas veces hasta encontrar uno que si sirva.
-            vAcc = -1;
-            for (int intento = 0; intento < 50; intento++) {
-                int v = (int) (Math.random() * parser.getVertexCount());
-                if (alcanzaAlgunCritico(v)) {
-                    vAcc = v;
-                    break;
-                }
-            }
-            if (vAcc == -1) {
-                System.out.println("No encontre un punto aleatorio con ruta a los criticos. Intenta de nuevo.\n");
-                return;
-            }
+            // cualquier vertice del grafo al azar (puede o no tener ruta a los criticos)
+            vAcc = (int) (Math.random() * parser.getVertexCount());
             System.out.println("Accidente aleatorio en el vertice " + vAcc
                     + " (" + parser.getLat(vAcc) + ", " + parser.getLon(vAcc) + ")");
         } else {
@@ -263,6 +269,10 @@ public class Main {
         double accLat = parser.getLat(vAcc);
         double accLon = parser.getLon(vAcc);
         System.out.println("\nAccidente en el vertice " + vAcc + " (" + accLat + ", " + accLon + ")");
+
+        // guardamos el accidente en el historial (lo usa la opcion 6B)
+        registrarEnHistorial(accLat, accLon);
+
         System.out.println("Buscando la ruta mas corta a cada punto critico con A*...\n");
 
         AStar astar = new AStar(parser.getGraph());
@@ -281,7 +291,7 @@ public class Main {
                 continue;
             }
             double dist = longitudRuta(ruta);
-            System.out.printf("  %s: %.1f m (%d nodos)%n", pc.nombre, dist, ruta.size());
+            System.out.printf("  %s: %.1f m, ~%.1f min (%d nodos)%n", pc.nombre, dist, tiempoMin(dist), ruta.size());
 
             if (dist < mejorDist) {
                 mejorDist = dist;
@@ -299,6 +309,8 @@ public class Main {
 
         System.out.println(">>> El mas cercano es: " + mejor.nombre);
         System.out.printf(">>> Distancia por las calles: %.1f m (%.2f km)%n", mejorDist, mejorDist / 1000.0);
+        System.out.printf(">>> Tiempo estimado de respuesta: ~%.1f min (a %.0f km/h)%n",
+                tiempoMin(mejorDist), VELOCIDAD_AMBULANCIA_KMH);
         System.out.println(">>> La ruta tiene " + mejorRuta.size() + " nodos");
         System.out.println();
 
@@ -310,6 +322,31 @@ public class Main {
         ultimoAccidente.mejor = mejor;
         ultimoAccidente.distancia = mejorDist;
         ultimoAccidente.nodos = mejorRuta.size();
+
+        // exportamos un mapa con el resultado grafico de la simulacion:
+        // criticos en verde, accidente en rojo y la ruta mas corta en azul
+        try {
+            File carpetaMapas = new File(MAPS_DIR);
+            if (!carpetaMapas.exists()) {
+                carpetaMapas.mkdirs();
+            }
+            // armo las listas de coordenadas y nombres de los criticos
+            ArrayList<double[]> coordsCriticos = new ArrayList<double[]>();
+            ArrayList<String> nombresCriticos = new ArrayList<String>();
+            for (PuntoCritico pc : criticos) {
+                coordsCriticos.add(new double[]{pc.lat, pc.lon});
+                nombresCriticos.add(pc.nombre);
+            }
+
+            // nombre automatico: mapas/simulacion_1.html, _2.html, ... (no repite)
+            String salida = siguienteNombreSimulacion();
+
+            MapExporter exp = new MapExporter(parser);
+            exp.exportarSimulacion(salida, mstActual, coordsCriticos, nombresCriticos, accLat, accLon, mejorRuta);
+        } catch (IOException e) {
+            System.out.println("No se pudo exportar el mapa de la simulacion: " + e.getMessage());
+        }
+        System.out.println();
     }
 
     // ---------- OPCION 4: metricas ----------
@@ -359,8 +396,8 @@ public class Main {
             System.out.println("Accidente en vertice " + r.verticeAccidente
                     + " (" + r.latAcc + ", " + r.lonAcc + ")");
             System.out.println("Critico mas cercano: " + r.mejor.nombre);
-            System.out.printf("Distancia: %.1f m (%.2f km), %d nodos%n",
-                    r.distancia, r.distancia / 1000.0, r.nodos);
+            System.out.printf("Distancia: %.1f m (%.2f km) | tiempo: ~%.1f min | %d nodos%n",
+                    r.distancia, r.distancia / 1000.0, tiempoMin(r.distancia), r.nodos);
         } else {
             System.out.println("Todavia no has simulado ningun accidente.");
         }
@@ -410,18 +447,333 @@ public class Main {
         return mst;
     }
 
-    // ---------- metodos de apoyo ----------
+    // ---------- OPCION 5: comparar rutas individuales vs MST (para el informe) ----------
+    // NO toca la simulacion; solo calcula numeros para el informe.
+    static void compararRutasVsMST() {
+        if (!hayMapa()) {
+            return;
+        }
+        if (criticos.size() < 2) {
+            System.out.println("Necesitas al menos 2 puntos criticos para comparar (opcion 2).\n");
+            return;
+        }
 
-    // devuelve true si desde el vertice v se puede llegar a algun critico
-    static boolean alcanzaAlgunCritico(int v) {
-        AStar astar = new AStar(parser.getGraph());
-        for (PuntoCritico pc : criticos) {
-            double[] h = parser.heuristicTo(pc.vertice);
-            if (astar.search(v, pc.vertice, h) != null) {
-                return true;
+        int k = criticos.size();
+        System.out.println("Calculando rutas mas cortas entre los " + k + " puntos de interes con A*...");
+
+        // A* sobre el grafo NO dirigido (la red de patrullaje ignora el sentido, igual que el MST)
+        AStar astar = new AStar(parser.getUndirectedGraph());
+
+        // matriz de distancias entre cada par de puntos de interes
+        double[][] d = new double[k][k];
+        boolean hayInalcanzable = false;
+        for (int i = 0; i < k; i++) {
+            for (int j = i + 1; j < k; j++) {
+                List<Integer> ruta = astar.search(criticos.get(i).vertice, criticos.get(j).vertice,
+                        parser.heuristicTo(criticos.get(j).vertice));
+                double dist = (ruta == null) ? Double.POSITIVE_INFINITY : longitudRuta(ruta);
+                d[i][j] = dist;
+                d[j][i] = dist;
+                if (Double.isInfinite(dist)) hayInalcanzable = true;
             }
         }
-        return false;
+        if (hayInalcanzable) {
+            System.out.println("Aviso: hay puntos que no se pueden conectar entre si (red desconectada).");
+        }
+
+        // ESTRELLA (rutas individuales): el mejor "hub" es el que minimiza la suma
+        // de distancias a los demas (1-mediana entre los puntos de interes)
+        int mejorHub = 0;
+        double mejorStar = Double.POSITIVE_INFINITY;
+        for (int h = 0; h < k; h++) {
+            double suma = 0;
+            for (int j = 0; j < k; j++) {
+                if (j != h) suma += d[h][j];
+            }
+            if (suma < mejorStar) {
+                mejorStar = suma;
+                mejorHub = h;
+            }
+        }
+
+        // MST sobre el grafo completo de puntos de interes (Prim sobre la matriz)
+        double mstTotal = mstSobreMatriz(d, k);
+
+        System.out.println("\n===== COMPARACION: rutas individuales vs MST =====");
+        System.out.println("Puntos de interes: " + k);
+        System.out.println("(A) INDIVIDUAL - estrella desde \"" + criticos.get(mejorHub).nombre + "\":");
+        System.out.printf ("    costo total: %.2f km  |  ~%.1f min%n", mejorStar / 1000.0, tiempoMin(mejorStar));
+        System.out.println("(B) MST - un solo recorrido que conecta todos:");
+        System.out.printf ("    costo total: %.2f km  |  ~%.1f min%n", mstTotal / 1000.0, tiempoMin(mstTotal));
+        if (mejorStar > 0 && !Double.isInfinite(mstTotal) && !Double.isInfinite(mejorStar)) {
+            double ahorro = (mejorStar - mstTotal) / mejorStar * 100.0;
+            System.out.printf ("Ahorro del MST frente a la estrella: %.1f%%%n", ahorro);
+        }
+        System.out.println("Cobertura: ambas estrategias conectan los " + k + " puntos.");
+        System.out.println("==================================================\n");
+    }
+
+    // Prim sobre una matriz de distancias (grafo completo de k puntos). Devuelve el costo total.
+    static double mstSobreMatriz(double[][] d, int k) {
+        boolean[] inMst = new boolean[k];
+        double[] key = new double[k];
+        java.util.Arrays.fill(key, Double.POSITIVE_INFINITY);
+        key[0] = 0;
+        double total = 0;
+        for (int it = 0; it < k; it++) {
+            int u = -1;
+            for (int v = 0; v < k; v++) {
+                if (!inMst[v] && (u == -1 || key[v] < key[u])) u = v;
+            }
+            if (u == -1 || Double.isInfinite(key[u])) break; // desconectado
+            inMst[u] = true;
+            total += key[u];
+            for (int v = 0; v < k; v++) {
+                if (!inMst[v] && d[u][v] < key[v]) key[v] = d[u][v];
+            }
+        }
+        return total;
+    }
+
+    // ---------- OPCION 6: sugerir ubicaciones de estaciones ----------
+    static void sugerirUbicaciones() {
+        if (!hayMapa()) {
+            return;
+        }
+        System.out.println("Como quieres sugerir las ubicaciones?");
+        System.out.println("  1. Por cobertura (k-centro: reparte k estaciones por toda la ciudad)");
+        System.out.println("  2. Por historial de accidentes (donde mas ocurren)");
+        int m = leerEntero("Opcion: ");
+        if (m == 1) {
+            sugerirPorCobertura();
+        } else if (m == 2) {
+            sugerirPorHistorial();
+        } else {
+            System.out.println("Opcion no valida.\n");
+        }
+    }
+
+    // 6A: corta el MST en k zonas (quitando las k-1 aristas mas largas) y propone
+    // una estacion en el centro de cada zona.
+    static void sugerirPorCobertura() {
+        int k = leerEntero("Cuantas estaciones quieres proponer (ej. 4): ");
+        if (k < 1) {
+            System.out.println("Numero invalido.\n");
+            return;
+        }
+        int n = parser.getVertexCount();
+        if (k > n) k = n;
+
+        // La primera estacion va en el centro geografico de la ciudad.
+        double sumLat = 0, sumLon = 0;
+        for (int i = 0; i < n; i++) {
+            sumLat += parser.getLat(i);
+            sumLon += parser.getLon(i);
+        }
+        int primera = parser.nearestVertex(sumLat / n, sumLon / n);
+
+        int[] estaciones = new int[k];
+        estaciones[0] = primera;
+
+        // minDist[v] = distancia (en linea recta) de v a la estacion mas cercana ya elegida
+        double[] minDist = new double[n];
+        for (int v = 0; v < n; v++) {
+            minDist[v] = OSMParser.haversine(parser.getLat(v), parser.getLon(v),
+                    parser.getLat(primera), parser.getLon(primera));
+        }
+
+        // farthest-first (k-centro): cada nueva estacion es el vertice MAS LEJANO
+        // a todas las que ya estan puestas. Asi quedan repartidas por toda la ciudad.
+        for (int s = 1; s < k; s++) {
+            int lejano = 0;
+            for (int v = 1; v < n; v++) {
+                if (minDist[v] > minDist[lejano]) lejano = v;
+            }
+            estaciones[s] = lejano;
+            for (int v = 0; v < n; v++) {
+                double dd = OSMParser.haversine(parser.getLat(v), parser.getLon(v),
+                        parser.getLat(lejano), parser.getLon(lejano));
+                if (dd < minDist[v]) minDist[v] = dd;
+            }
+        }
+
+        // Para el "por que": asignamos cada interseccion a su estacion mas cercana
+        // y medimos cuantas cubre y su radio maximo.
+        int[] cuenta = new int[k];
+        double[] radio = new double[k];
+        for (int v = 0; v < n; v++) {
+            int mejor = 0;
+            double md = Double.POSITIVE_INFINITY;
+            for (int s = 0; s < k; s++) {
+                double dd = OSMParser.haversine(parser.getLat(v), parser.getLon(v),
+                        parser.getLat(estaciones[s]), parser.getLon(estaciones[s]));
+                if (dd < md) { md = dd; mejor = s; }
+            }
+            cuenta[mejor]++;
+            if (md > radio[mejor]) radio[mejor] = md;
+        }
+
+        ArrayList<double[]> coords = new ArrayList<double[]>();
+        ArrayList<String> etiquetas = new ArrayList<String>();
+
+        System.out.println("\n===== SUGERENCIA POR COBERTURA (k-centro) =====");
+        for (int s = 0; s < k; s++) {
+            int e = estaciones[s];
+            System.out.printf("Estacion %d: vertice %d (%.6f, %.6f)%n",
+                    s + 1, e, parser.getLat(e), parser.getLon(e));
+            System.out.printf("   cubre %d intersecciones, radio maximo ~%.0f m (~%.1f min)%n",
+                    cuenta[s], radio[s], tiempoMin(radio[s]));
+            coords.add(new double[]{parser.getLat(e), parser.getLon(e)});
+            etiquetas.add("Estacion " + (s + 1));
+        }
+        System.out.println("Idea: cada estacion queda lo mas lejos posible de las otras, para");
+        System.out.println("cubrir la ciudad de forma pareja (triangulacion).");
+        System.out.println("===============================================\n");
+
+        exportarSugerencia("mapas/sugerencia_cobertura.html", coords, etiquetas, null);
+    }
+
+    // 6B: usa el historial de accidentes para proponer la estacion donde mas ocurren.
+    static void sugerirPorHistorial() {
+        ArrayList<double[]> accidentes = leerHistorial();
+
+        if (accidentes.isEmpty()) {
+            System.out.println("No hay historial de accidentes todavia.");
+            boolean gen = leerSiNo("Quieres generar 30 accidentes aleatorios de ejemplo? (s/n): ");
+            if (!gen) {
+                System.out.println("Simula accidentes con la opcion 3 y vuelve.\n");
+                return;
+            }
+            for (int i = 0; i < 30; i++) {
+                int v = (int) (Math.random() * parser.getVertexCount());
+                registrarEnHistorial(parser.getLat(v), parser.getLon(v));
+            }
+            accidentes = leerHistorial();
+        }
+
+        // bounding box del mapa
+        int n = parser.getVertexCount();
+        double latMin = Double.POSITIVE_INFINITY, latMax = -Double.POSITIVE_INFINITY;
+        double lonMin = Double.POSITIVE_INFINITY, lonMax = -Double.POSITIVE_INFINITY;
+        for (int i = 0; i < n; i++) {
+            double la = parser.getLat(i), lo = parser.getLon(i);
+            if (la < latMin) latMin = la;
+            if (la > latMax) latMax = la;
+            if (lo < lonMin) lonMin = lo;
+            if (lo > lonMax) lonMax = lo;
+        }
+
+        // rejilla de 6x6: contamos accidentes por celda y buscamos la mas cargada
+        int G = 6;
+        int[][] conteo = new int[G][G];
+        double dLat = (latMax - latMin) / G;
+        double dLon = (lonMax - lonMin) / G;
+        for (double[] a : accidentes) {
+            int fi = (int) ((a[0] - latMin) / dLat);
+            int co = (int) ((a[1] - lonMin) / dLon);
+            if (fi < 0) fi = 0; if (fi >= G) fi = G - 1;
+            if (co < 0) co = 0; if (co >= G) co = G - 1;
+            conteo[fi][co]++;
+        }
+        int maxFi = 0, maxCo = 0, maxCant = -1;
+        for (int i = 0; i < G; i++) {
+            for (int j = 0; j < G; j++) {
+                if (conteo[i][j] > maxCant) { maxCant = conteo[i][j]; maxFi = i; maxCo = j; }
+            }
+        }
+
+        // centro de los accidentes que cayeron en la celda mas cargada
+        double sumLat = 0, sumLon = 0;
+        int c = 0;
+        for (double[] a : accidentes) {
+            int fi = (int) ((a[0] - latMin) / dLat);
+            int co = (int) ((a[1] - lonMin) / dLon);
+            if (fi < 0) fi = 0; if (fi >= G) fi = G - 1;
+            if (co < 0) co = 0; if (co >= G) co = G - 1;
+            if (fi == maxFi && co == maxCo) { sumLat += a[0]; sumLon += a[1]; c++; }
+        }
+        int estacion = parser.nearestVertex(sumLat / c, sumLon / c);
+        double pct = 100.0 * maxCant / accidentes.size();
+
+        System.out.println("\n===== SUGERENCIA POR HISTORIAL DE ACCIDENTES =====");
+        System.out.println("Accidentes en el historial: " + accidentes.size());
+        System.out.printf ("La zona mas critica concentra %d accidentes (%.0f%% del total).%n", maxCant, pct);
+        System.out.printf ("Estacion sugerida: vertice %d (%.6f, %.6f)%n",
+                estacion, parser.getLat(estacion), parser.getLon(estacion));
+        System.out.println("Por que: es el centro de la zona donde mas accidentes ocurren, asi");
+        System.out.println("baja el tiempo de respuesta justo donde mas se necesita.");
+        System.out.println("==================================================\n");
+
+        ArrayList<double[]> est = new ArrayList<double[]>();
+        ArrayList<String> etq = new ArrayList<String>();
+        est.add(new double[]{parser.getLat(estacion), parser.getLon(estacion)});
+        etq.add("Estacion sugerida");
+        exportarSugerencia("mapas/sugerencia_historial.html", est, etq, accidentes);
+    }
+
+    // exporta un html con las estaciones sugeridas (y opcionalmente los accidentes)
+    static void exportarSugerencia(String salida, ArrayList<double[]> estaciones,
+                                   ArrayList<String> etiquetas, ArrayList<double[]> accidentes) {
+        try {
+            File carpeta = new File(MAPS_DIR);
+            if (!carpeta.exists()) carpeta.mkdirs();
+            MapExporter exp = new MapExporter(parser);
+            exp.exportarUbicaciones(salida, estaciones, etiquetas, accidentes);
+        } catch (IOException e) {
+            System.out.println("No se pudo exportar el mapa: " + e.getMessage());
+        }
+    }
+
+    // agrega un accidente (lat,lon) al archivo de historial
+    static void registrarEnHistorial(double lat, double lon) {
+        try {
+            FileWriter fw = new FileWriter(HIST_FILE, true); // true = agregar al final
+            fw.write(lat + "," + lon + "\n");
+            fw.close();
+        } catch (IOException e) {
+            // no es grave, seguimos sin historial
+        }
+    }
+
+    // lee el archivo de historial y devuelve la lista de {lat, lon}
+    static ArrayList<double[]> leerHistorial() {
+        ArrayList<double[]> lista = new ArrayList<double[]>();
+        File f = new File(HIST_FILE);
+        if (!f.exists()) return lista;
+        try {
+            for (String linea : Files.readAllLines(Paths.get(HIST_FILE))) {
+                linea = linea.trim();
+                if (linea.isEmpty()) continue;
+                String[] p = linea.split(",");
+                if (p.length >= 2) {
+                    lista.add(new double[]{Double.parseDouble(p[0]), Double.parseDouble(p[1])});
+                }
+            }
+        } catch (IOException | NumberFormatException e) {
+            System.out.println("Aviso: no se pudo leer bien el historial: " + e.getMessage());
+        }
+        return lista;
+    }
+
+    // ---------- metodos de apoyo ----------
+
+    // busca el siguiente nombre libre tipo mapas/simulacion_1.html, _2.html, ...
+    static String siguienteNombreSimulacion() {
+        int n = 1;
+        File f = new File(MAPS_DIR, "simulacion_" + n + ".html");
+        while (f.exists()) {
+            n++;
+            f = new File(MAPS_DIR, "simulacion_" + n + ".html");
+        }
+        return f.getPath();
+    }
+
+    // convierte una distancia en metros al tiempo (en minutos) que tardaria la
+    // ambulancia a VELOCIDAD_AMBULANCIA_KMH. tiempo = distancia / velocidad
+    static double tiempoMin(double metros) {
+        double km = metros / 1000.0;
+        double horas = km / VELOCIDAD_AMBULANCIA_KMH;
+        return horas * 60.0;
     }
 
     // suma la distancia real (haversine) entre los nodos de la ruta

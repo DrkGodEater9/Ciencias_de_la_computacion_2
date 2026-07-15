@@ -43,6 +43,21 @@ public class OSMParser {
     private final ArrayList<double[]> coordList = new ArrayList<double[]>(); // {lat, lon}
 
     /**
+     * Tipos de "highway" por los que SÍ puede circular un vehículo (ambulancia).
+     * Todo lo demás (footway, cycleway, pedestrian, path, steps, track...) se
+     * descarta al construir el grafo, porque una ambulancia no puede usarlo.
+     */
+    private static final java.util.Set<String> CALLES_VEHICULOS = new java.util.HashSet<String>(
+        java.util.Arrays.asList(
+            "motorway", "trunk", "primary", "secondary", "tertiary",
+            "unclassified", "residential", "service", "living_street", "road",
+            "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"
+        ));
+
+    /** Cuántas vías se descartaron por no ser aptas para vehículos. */
+    private int discardedWayCount = 0;
+
+    /**
      * Carga y parsea el archivo. Después de llamar a este constructor el
      * grafo ya está construido y disponible con getGraph().
      *
@@ -83,6 +98,15 @@ public class OSMParser {
             // orden de las coordenadas; "-1" = sentido único pero invertido;
             // cualquier otro valor (o ausente) = doble sentido.
             JSONObject props = feature.optJSONObject("properties");
+
+            // Filtro: solo dejamos calles por las que puede pasar una ambulancia.
+            // Descartamos footway, cycleway, pedestrian, path, steps, track, etc.
+            String highway = (props != null) ? props.optString("highway", "") : "";
+            if (!CALLES_VEHICULOS.contains(highway)) {
+                discardedWayCount++;
+                continue;
+            }
+
             String onewayTag = (props != null) ? props.optString("oneway", "no") : "no";
             boolean oneway  = onewayTag.equals("yes") || onewayTag.equals("1") || onewayTag.equals("true");
             boolean reversed = onewayTag.equals("-1");
@@ -157,6 +181,9 @@ public class OSMParser {
 
     /** Cuántos tramos de calle son de doble sentido ("bidireccional"). */
     public int getTwoWayStreetCount() { return twoWayStreetCount; }
+
+    /** Cuántas vías se descartaron por no ser aptas para vehículos (peatonales, ciclorrutas...). */
+    public int getDiscardedWayCount() { return discardedWayCount; }
 
     /** Devuelve el índice del vértice para una coordenada, creándolo si es nuevo. */
     private int indexFor(double plat, double plon) {
